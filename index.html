@@ -1,172 +1,639 @@
-<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GhostOS - Config Individual</title>
-    <style>
-        body { background: #0d0d0d; color: #00ff41; font-family: 'Courier New', monospace; padding: 20px; }
-        .terminal { max-width: 600px; margin: 0 auto; border: 1px solid #00ff41; padding: 20px; box-shadow: 0 0 15px rgba(0, 255, 65, 0.2); }
-        .controls { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
-        select { background: #1a1a1a; color: #00ff41; border: 1px solid #00ff41; padding: 5px; outline: none; cursor: pointer; }
-        input { width: 100%; background: #1a1a1a; border: 1px solid #333; color: #00ff41; padding: 12px; font-size: 1rem; outline: none; box-sizing: border-box; }
-        .btns-container { display: flex; gap: 10px; margin-top: 15px; min-height: 40px; }
-        button { flex: 1; background: #002b0b; border: 1px solid #00ff41; color: #00ff41; padding: 8px; cursor: pointer; visibility: hidden; transition: 0.2s; }
-        button:hover { background: #00ff41; color: #000; }
-        .log { font-size: 0.7rem; color: #666; margin-top: 20px; border-top: 1px solid #222; padding-top: 10px; }
-    </style>
-</head>
-<body>
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+const readline = require('readline');
 
-<div class="terminal">
-    <div class="controls">
-        <h3>> GHOST_CORRECTOR</h3>
-        <select id="langSelect" onchange="trocarContexto()">
-            <option value="PT">Português</option>
-            <option value="EN">English</option>
-            <option value="LUA">Lua/Dev</option>
-        </select>
-    </div>
+const CONFIG = {
+    diretorioDados: path.join(__dirname, 'dados'),
+    caminhoHistorico: path.join(__dirname, 'historico.json'),
+    caminhoRejeitados: path.join(__dirname, 'rejeitados_temp.json'), // Arquivo para palavras rejeitadas
+    githubUrlBase: 'https://raw.githubusercontent.com/pitocoofc/Auto-corretor-/main/dicts'
+};
 
-    <input type="text" id="inputUser" placeholder="Digite aqui..." autocomplete="off">
-    
-    <div class="btns-container" id="sugestoes">
-        <button onclick="completar(this)"></button>
-        <button onclick="completar(this)"></button>
-        <button onclick="completar(this)"></button>
-    </div>
+const COMPATIBILIDADES = {
+    'e': ['e', 'i'], 'i': ['i', 'e'],
+    'c': ['c', 'k', 'q', 's', 'ç'], 'ç': ['ç', 'c', 's'], 'k': ['k', 'c', 'q'], 'q': ['q', 'c', 'k'],
+    's': ['s', 'c', 'ç', 'z'], 'z': ['z', 's'],
+    'g': ['g', 'j'], 'j': ['j', 'g'],
+    'h': ['h', 'a', 'e', 'o', 'u', 'i']
+};
 
-    <div class="log" id="status">Iniciando sistema...</div>
-</div>
+const MUTACOES_FONETICAS = {
+    's': ['ss', 'c', 'ç', 'z', 'x'],
+    'ss': ['s', 'ç', 'c'],
+    'ç': ['s', 'ss', 'c'],
+    'c': ['s', 'ç', 'k', 'q'],
+    'z': ['s', 'x'],
+    'x': ['ch', 's', 'z'],
+    'g': ['j'],
+    'j': ['g'],
+    'sc': ['c', 's', 'ç'],
+    'ss': ['s', 'ç', 'c'],
+    'ç': ['c', 's', 'ss'],
+    'c': ['ç', 's', 'k', 'q'],
+    's': ['ç', 'c', 'z', 'ss'],
+    'j': ['g'],
+    'g': ['j']
+};
 
-<script>
-    // --- DEFINIÇÕES INDIVIDUAIS ---
-    
-    const CONFIG_PT = {
-        pasta: './dicts/',
-        arquivos: ['a.txt', 'b.txt', 'c.txt', 'd.txt', 'e.txt', 'f.txt', 'g.txt', 'h.txt', 'i.txt', 'j.txt', 'k.txt', 'l.txt', 'm.txt', 'n.txt', 'o.txt', 'p.txt', 'q.txt', 'r.txt', 's.txt', 't.txt', 'u.txt', 'v.txt', 'w.txt', 'x.txt', 'y.txt', 'z.txt'],
-        regex: /^[a-záàâãéèêíïóôõöúçñ-]+$/
-    };
+function removerAcentos(str) {
+    return str.normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toLowerCase();
+}
 
-    const CONFIG_EN = {
-        pasta: './en/',
-        arquivos: ['common.txt', 'fruit.txt'], // Seus arquivos específicos
-        regex: /^[a-z-]+$/
-    };
+function calcularLevenshtein(s1, s2) {
+    const str1 = removerAcentos(s1);
+    const str2 = removerAcentos(s2);
 
-    const CONFIG_LUA = {
-        pasta: './lua/',
-        arquivos: ['keywords.txt', 'methods.txt', 'ghost_api.txt'],
-        regex: null // Permite qualquer símbolo em código
-    };
+    if (str1 === str2) return 0;
+    if (!str1.length) return str2.length;
+    if (!str2.length) return str1.length;
 
-    const MAPA_LANG = {
-        'PT': CONFIG_PT,
-        'EN': CONFIG_EN,
-        'LUA': CONFIG_LUA
-    };
+    let v0 = Array.from({ length: str2.length + 1 }, (_, i) => i);
+    let v1 = new Array(str2.length + 1);
 
-    let bancoGeral = [];
-
-    // --- LÓGICA DE CORE ---
-
-    function getDistancia(s1, s2) {
-        let v0 = Array.from({length: s2.length + 1}, (_, i) => i);
-        let v1 = [];
-        for (let i = 0; i < s1.length; i++) {
-            v1[0] = i + 1;
-            for (let j = 0; j < s2.length; j++) {
-                v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + (s1[i] === s2[j] ? 0 : 1));
-            }
-            v0 = [...v1];
+    for (let i = 0; i < str1.length; i++) {
+        v1[0] = i + 1;
+        for (let j = 0; j < str2.length; j++) {
+            let custo = (str1[i] === str2[j]) ? 0 : 1;
+            v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + custo);
         }
-        return v0[s2.length];
+        v0 = [...v1];
+    }
+    return v0[str2.length];
+}
+
+function baixarArquivoDicionario(letra) {
+    const nomeArquivo = `${letra}.txt`;
+    const caminhoLocal = path.join(CONFIG.diretorioDados, nomeArquivo);
+    const urlRemota = `${CONFIG.githubUrlBase}/${nomeArquivo}`;
+
+    return new Promise((resolve, reject) => {
+        const stream = fs.createWriteStream(caminhoLocal);
+        https.get(urlRemota, (res) => {
+            if (res.statusCode !== 200) {
+                reject(new Error(`Erro ao baixar ${nomeArquivo}: Código ${res.statusCode}`));
+                return;
+            }
+            res.pipe(stream);
+            stream.on('finish', () => { stream.close(); resolve(); });
+        }).on('error', (err) => {
+            fs.unlink(caminhoLocal, () => {});
+            reject(err);
+        });
+    });
+}
+
+async function garantirTodosDicionarios() {
+    if (!fs.existsSync(CONFIG.diretorioDados)) {
+        fs.mkdirSync(CONFIG.diretorioDados, { recursive: true });
+    }
+    const alfabeto = Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + i));
+    const downloadsFaltando = [];
+
+    for (const letra of alfabeto) {
+        if (!fs.existsSync(path.join(CONFIG.diretorioDados, `${letra}.txt`))) {
+            downloadsFaltando.push(letra);
+        }
     }
 
-    async function trocarContexto() {
-        const lang = document.getElementById('langSelect').value;
-        const conf = MAPA_LANG[lang];
-        bancoGeral = [];
-        await boot(conf);
+    if (downloadsFaltando.length > 0) {
+        console.log(`⚠️ Sincronizando dicionários do GitHub: [${downloadsFaltando.join(', ')}]...`);
+
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < downloadsFaltando.length; i += BATCH_SIZE) {
+            const batch = downloadsFaltando.slice(i, i + BATCH_SIZE);
+            await Promise.all(batch.map(letra => baixarArquivoDicionario(letra)));
+            if (i + BATCH_SIZE < downloadsFaltando.length) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+        console.log("✅ Dicionários prontos!");
+    }
+    return true;
+}
+
+class MotorOrtografico {
+    constructor() {
+        this.dicionario = {};
+        this.historico = {};
+        this.cacheSugestoes = new Map();
+        this.rejeitados = {}; // Armazena palavras rejeitadas por palavra original
+        this.palavraAtual = ''; // Palavra sendo processada no momento
+
+        const alfabeto = Array.from({ length: 26 }, (_, i) => String.fromCharCode(97 + i));
+        for (const letra of alfabeto) {
+            this.dicionario[letra] = new Set();
+        }
+        this.carregarHistorico();
+        this.carregarRejeitados();
+        this.usandoBanco = false;
+        this.MAX_OPCOES_PERSONALIZADAS = 10;
+        this.MAX_OPCOES_BANCO = 15;
     }
 
-    async function boot(config) {
-        const status = document.getElementById('status');
+    carregarHistorico() {
+        if (fs.existsSync(CONFIG.caminhoHistorico)) {
+            try {
+                this.historico = JSON.parse(fs.readFileSync(CONFIG.caminhoHistorico, 'utf-8'));
+            } catch (e) {
+                this.historico = {};
+            }
+        }
+    }
+
+    carregarRejeitados() {
+        if (fs.existsSync(CONFIG.caminhoRejeitados)) {
+            try {
+                this.rejeitados = JSON.parse(fs.readFileSync(CONFIG.caminhoRejeitados, 'utf-8'));
+            } catch (e) {
+                this.rejeitados = {};
+            }
+        }
+    }
+
+    salvarRejeitados() {
         try {
-            for (const file of config.arquivos) {
-                // Atualiza o texto para cada arquivo lido
-                status.innerText = `Lendo: ${file}...`;
-                
-                const res = await fetch(config.pasta + file);
-                if (!res.ok) continue;
-
-                const data = await res.text();
-                const linhas = data.split(/\r?\n/)
-                    .map(p => p.trim().toLowerCase())
-                    .filter(p => {
-                        if (!p) return false;
-                        if (!config.regex) return true;
-                        return config.regex.test(p);
-                    });
-
-                bancoGeral = [...new Set([...bancoGeral, ...linhas])];
-            }
-            // Exibe o resultado final após o loop
-            status.innerText = `Sistema Online: ${bancoGeral.length} termos carregados.`;
-        } catch (err) {
-            status.innerText = "Falha no boot da linguagem.";
-            console.error(err);
+            fs.writeFileSync(CONFIG.caminhoRejeitados, JSON.stringify(this.rejeitados, null, 2), 'utf-8');
+        } catch (e) {
+            console.error('⚠️ Erro ao salvar rejeitados:', e.message);
         }
     }
 
+    limparRejeitados(palavra) {
+        const limpa = palavra.toLowerCase().replace(/[^a-zA-Záéíóúâêîôûãõç]/g, '');
+        if (this.rejeitados[limpa]) {
+            delete this.rejeitados[limpa];
+            this.salvarRejeitados();
+            console.log(`🧹 Lista de rejeitados limpa para "${palavra}"`);
+        }
+    }
 
-    // --- INTERFACE ---
+    registrarRejeicao(palavra, sugestaoRejeitada) {
+        const limpa = palavra.toLowerCase().replace(/[^a-zA-Záéíóúâêîôûãõç]/g, '');
+        if (!this.rejeitados[limpa]) {
+            this.rejeitados[limpa] = new Set();
+        }
+        this.rejeitados[limpa].add(sugestaoRejeitada.toLowerCase());
+        this.salvarRejeitados();
+    }
 
-    const input = document.getElementById('inputUser');
-    const botoes = document.querySelectorAll('#sugestoes button');
+    getRejeitados(palavra) {
+        const limpa = palavra.toLowerCase().replace(/[^a-zA-Záéíóúâêîôûãõç]/g, '');
+        return this.rejeitados[limpa] || new Set();
+    }
 
-    input.addEventListener('input', () => {
-        const texto = input.value;
-        const partes = texto.trim().split(/\s+/);
-        const ultima = partes[partes.length - 1].toLowerCase();
+    salvarHistorico(palavraCorreta) {
+        const termo = palavraCorreta.toLowerCase();
+        this.historico[termo] = (this.historico[termo] || 0) + 1;
+        try {
+            fs.writeFileSync(CONFIG.caminhoHistorico, JSON.stringify(this.historico, null, 2), 'utf-8');
+        } catch (e) {
+            console.error('⚠️ Erro ao salvar histórico:', e.message);
+        }
+    }
 
-        if (!ultima || texto.endsWith(' ')) {
-            botoes.forEach(b => b.style.visibility = 'hidden');
+    limparCache() {
+        if (this.cacheSugestoes.size > 1000) {
+            this.cacheSugestoes.clear();
+            console.log('🧹 Cache de sugestões limpo');
+        }
+    }
+
+    carregarBasesLocais() {
+        let totalPalavras = 0;
+        for (const letra in this.dicionario) {
+            const caminho = path.join(CONFIG.diretorioDados, `${letra}.txt`);
+            if (fs.existsSync(caminho)) {
+                try {
+                    const conteudo = fs.readFileSync(caminho, 'utf-8');
+                    const linhas = conteudo.split(/\r?\n/)
+                        .map(p => p.trim().toLowerCase())
+                        .filter(p => p.length > 0 && /^[a-záéíóúâêîôûãõç]+$/.test(p) && p.length <= 30);
+
+                    for (const palavra of linhas) {
+                        this.dicionario[letra].add(palavra);
+                        totalPalavras++;
+                    }
+                } catch (e) {
+                    console.error(` Erro ao ler ${letra}.txt:`, e.message);
+                }
+            }
+        }
+        console.log(` Memória carregada. Total de termos indexados: ${totalPalavras}`);
+    }
+
+    existePalavra(palavraLimpa) {
+        if (!palavraLimpa || palavraLimpa.length === 0) return false;
+        const primeiraLetra = removerAcentos(palavraLimpa)[0];
+        if (this.dicionario[primeiraLetra]) {
+            return this.dicionario[primeiraLetra].has(palavraLimpa);
+        }
+        return false;
+    }
+
+    gerarTodasVariacoesFoneticas(palavra) {
+        const resultados = new Set();
+        const arrLetras = palavra.split('');
+
+        function permutar(index, stringAtual) {
+            if (index >= arrLetras.length) {
+                resultados.add(stringAtual);
+                return;
+            }
+
+            const caractereAtual = arrLetras[index];
+            const proximoCaractere = arrLetras[index + 1] || '';
+            const combinacaoDupla = caractereAtual + proximoCaractere;
+
+            if (MUTACOES_FONETICAS[combinacaoDupla] && index + 1 < arrLetras.length) {
+                for (let alt of MUTACOES_FONETICAS[combinacaoDupla]) {
+                    permutar(index + 2, stringAtual + alt);
+                }
+            }
+
+            if (MUTACOES_FONETICAS[caractereAtual]) {
+                for (let alt of MUTACOES_FONETICAS[caractereAtual]) {
+                    permutar(index + 1, stringAtual + alt);
+                }
+            }
+
+            permutar(index + 1, stringAtual + caractereAtual);
+        }
+
+        permutar(0, "");
+        resultados.delete(palavra);
+        return Array.from(resultados);
+    }
+
+    gerarSubstituicoesEspecificas(palavra) {
+        const substituicoes = new Set();
+
+        const substituicoesMap = {
+            'ç': ['c', 's', 'ss'],
+            'ss': ['s', 'ç', 'c'],
+            'c': ['ç', 's', 'k', 'q'],
+            's': ['ç', 'c', 'z', 'ss'],
+            'j': ['g'],
+            'g': ['j'],
+            'sc': ['c', 's', 'ç'],
+            'x': ['ch', 's', 'z'],
+            'z': ['s', 'x']
+        };
+
+        for (const [padrao, alternativas] of Object.entries(substituicoesMap)) {
+            if (palavra.includes(padrao)) {
+                for (const alt of alternativas) {
+                    const variacao = palavra.replace(new RegExp(padrao, 'g'), alt);
+                    if (variacao !== palavra && !substituicoes.has(variacao)) {
+                        substituicoes.add(variacao);
+                    }
+                }
+            }
+        }
+
+        return Array.from(substituicoes);
+    }
+
+    gerarSugestoesFoneticas(palavra, ignorarLista = new Set()) {
+        const limpa = palavra.toLowerCase().replace(/[^a-zA-Záéíóúâêîôûãõç]/g, '');
+        if (!limpa) return [];
+
+        const sugestoes = new Map();
+        const rejeitados = this.getRejeitados(limpa);
+
+       
+        const substituicoes = this.gerarSubstituicoesEspecificas(limpa);
+        for (const sub of substituicoes) {
+            if (!ignorarLista.has(sub) && !rejeitados.has(sub) && sub !== limpa) {
+                const dist = calcularLevenshtein(limpa, sub);
+                sugestoes.set(sub, { palavra: sub, distancia: dist * 0.3, tipo: 'substituicao' });
+            }
+        }
+
+        
+        const mutacoes = this.gerarTodasVariacoesFoneticas(limpa);
+        const mutacoesOrdenadas = mutacoes
+            .filter(mut => !ignorarLista.has(mut) && !rejeitados.has(mut) && mut !== limpa && !sugestoes.has(mut))
+            .map(mut => ({
+                palavra: mut,
+                distancia: calcularLevenshtein(limpa, mut) * 0.5
+            }))
+            .sort((a, b) => a.distancia - b.distancia);
+
+        for (const mut of mutacoesOrdenadas) {
+            if (sugestoes.size >= this.MAX_OPCOES_PERSONALIZADAS) break;
+            sugestoes.set(mut.palavra, mut);
+        }
+
+        return Array.from(sugestoes.values())
+            .sort((a, b) => a.distancia - b.distancia)
+            .map(c => c.palavra);
+    }
+
+    buscarNoBanco(palavra, ignorarLista = new Set()) {
+        const limpa = palavra.toLowerCase().replace(/[^a-zA-Záéíóúâêîôûãõç]/g, '');
+        if (!limpa) return [];
+
+        let candidatosMap = new Map();
+        const rejeitados = this.getRejeitados(limpa);
+        const primeiraLetra = removerAcentos(limpa)[0];
+        const letrasParaBuscar = COMPATIBILIDADES[primeiraLetra] || [primeiraLetra];
+
+        for (const letra of letrasParaBuscar) {
+            const subDicionario = this.dicionario[letra];
+            if (!subDicionario) continue;
+
+            for (let palavraValida of subDicionario) {
+                
+                if (ignorarLista.has(palavraValida) || rejeitados.has(palavraValida) || candidatosMap.has(palavraValida)) continue;
+                if (candidatosMap.size >= this.MAX_OPCOES_BANCO * 3) break;
+
+                const lenValida = removerAcentos(palavraValida).length;
+                const lenLimpa = removerAcentos(limpa).length;
+
+                const limiteMaximoDistancia = lenLimpa > 5 ? 3 : 2;
+                if (Math.abs(lenValida - lenLimpa) > limiteMaximoDistancia + 1) continue;
+
+                let dist = calcularLevenshtein(limpa, palavraValida);
+
+                if (removerAcentos(palavraValida) === removerAcentos(limpa)) {
+                    dist = 0;
+                }
+
+                if (dist <= limiteMaximoDistancia + 1) {
+                    const pesoUso = this.historico[palavraValida] || 0;
+                    candidatosMap.set(palavraValida, {
+                        palavra: palavraValida,
+                        distancia: dist,
+                        uso: pesoUso
+                    });
+                }
+            }
+        }
+
+        
+        if (candidatosMap.size === 0) {
+            console.log(`   🔍 Buscando em todo o dicionário...`);
+            for (const letra in this.dicionario) {
+                const subDicionario = this.dicionario[letra];
+                if (!subDicionario) continue;
+
+                let contador = 0;
+                for (let palavraValida of subDicionario) {
+                    if (contador > 200) break;
+                    if (ignorarLista.has(palavraValida) || rejeitados.has(palavraValida) || candidatosMap.has(palavraValida)) continue;
+                    if (candidatosMap.size >= this.MAX_OPCOES_BANCO * 3) break;
+
+                    const lenValida = removerAcentos(palavraValida).length;
+                    const lenLimpa = removerAcentos(limpa).length;
+
+                    if (Math.abs(lenValida - lenLimpa) > 4) continue;
+
+                    let dist = calcularLevenshtein(limpa, palavraValida);
+
+                    if (dist <= 3) {
+                        const pesoUso = this.historico[palavraValida] || 0;
+                        candidatosMap.set(palavraValida, {
+                            palavra: palavraValida,
+                            distancia: dist + 1,
+                            uso: pesoUso
+                        });
+                        contador++;
+                    }
+                }
+            }
+        }
+
+        return Array.from(candidatosMap.values())
+            .sort((a, b) => {
+                if (a.distancia !== b.distancia) return a.distancia - b.distancia;
+                return b.uso - a.uso;
+            })
+            .slice(0, this.MAX_OPCOES_BANCO)
+            .map(c => c.palavra);
+    }
+
+    obterSugestoes(palavra, ignorarLista = new Set()) {
+        const limpa = palavra.toLowerCase().replace(/[^a-zA-Záéíóúâêîôûãõç]/g, '');
+
+        
+        if (this.palavraAtual && this.palavraAtual !== limpa) {
+            this.limparRejeitados(this.palavraAtual);
+        }
+        this.palavraAtual = limpa;
+
+        const chaveCache = `${limpa}|${Array.from(ignorarLista).join(',')}`;
+        if (this.cacheSugestoes.has(chaveCache)) {
+            return this.cacheSugestoes.get(chaveCache);
+        }
+
+        if (!limpa || this.existePalavra(limpa)) {
+            const resultado = [palavra];
+            this.cacheSugestoes.set(chaveCache, resultado);
+            return resultado;
+        }
+
+        let resultado = [];
+        const rejeitados = this.getRejeitados(limpa);
+        const ignorarTotal = new Set([...ignorarLista, ...rejeitados]);
+
+        
+        const sugestoesFoneticas = this.gerarSugestoesFoneticas(limpa, ignorarTotal);
+
+        if (sugestoesFoneticas.length > 0) {
+            resultado = sugestoesFoneticas;
+            this.usandoBanco = false;
+            console.log(`\n Gerando ${Math.min(sugestoesFoneticas.length, this.MAX_OPCOES_PERSONALIZADAS)} correções fonéticas...`);
+            if (rejeitados.size > 0) {
+                console.log(`    ${rejeitados.size} opções já foram rejeitadas e foram removidas`);
+            }
+        } else {
+            
+            console.log(`\n Nenhuma correção fonética disponível. Buscando no banco...`);
+            if (rejeitados.size > 0) {
+                console.log(`    ${rejeitados.size} opções já foram rejeitadas e foram removidas`);
+            }
+            const sugestoesBanco = this.buscarNoBanco(limpa, ignorarTotal);
+            if (sugestoesBanco.length > 0) {
+                resultado = sugestoesBanco;
+                this.usandoBanco = true;
+                console.log(` Encontradas ${sugestoesBanco.length} sugestões no banco.`);
+            } else {
+                
+                console.log(`\n Gerando variações manuais...`);
+                const todasVariacoes = this.gerarTodasVariacoesFoneticas(limpa);
+                const substituicoes = this.gerarSubstituicoesEspecificas(limpa);
+                const todas = [...todasVariacoes, ...substituicoes];
+
+                const unicas = new Set();
+                for (const variacao of todas) {
+                    if (variacao !== limpa && !ignorarTotal.has(variacao)) {
+                        unicas.add(variacao);
+                        if (unicas.size >= this.MAX_OPCOES_PERSONALIZADAS) break;
+                    }
+                }
+                resultado = Array.from(unicas);
+                this.usandoBanco = false;
+            }
+        }
+
+        const ehMaiuscula = palavra[0] === palavra[0].toUpperCase();
+        const resultadoFinal = resultado.map(c => {
+            return ehMaiuscula ? c.charAt(0).toUpperCase() + c.slice(1) : c;
+        });
+
+        this.cacheSugestoes.set(chaveCache, resultadoFinal);
+        return resultadoFinal;
+    }
+
+    processarTexto(texto, mapaSugestoesEscolhidas) {
+        return texto.replace(/[a-zA-Záéíóúâêîôûãõç]+/g, (match) => {
+            return mapaSugestoesEscolhidas.has(match) ? mapaSugestoesEscolhidas.get(match) : match;
+        });
+    }
+}
+
+const perguntarNoTerminal = (query, timeout = 30000) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            rl.close();
+            reject(new Error('Tempo limite excedido'));
+        }, timeout);
+
+        rl.question(query, ans => {
+            clearTimeout(timer);
+            rl.close();
+            const resposta = ans.trim().toLowerCase();
+            resolve(resposta || 'n');
+        });
+    });
+};
+
+async function rodarCorretorDeArquivo(caminhoDoArquivoAlvo) {
+    try {
+        await garantirTodosDicionarios();
+
+        const ia = new MotorOrtografico();
+        ia.carregarBasesLocais();
+
+        if (!fs.existsSync(caminhoDoArquivoAlvo)) {
+            console.error(` Crie o arquivo '${path.basename(caminhoDoArquivoAlvo)}' primeiro.`);
             return;
         }
 
-        let matches = bancoGeral.filter(p => p.startsWith(ultima)).slice(0, 3);
+        console.log(`\n Lendo arquivo local...`);
+        const textoOriginal = fs.readFileSync(caminhoDoArquivoAlvo, 'utf-8');
+        const palavrasDoTexto = textoOriginal.match(/[a-zA-Záéíóúâêîôûãõç]+/g) || [];
+        const palavrasUnicas = [...new Set(palavrasDoTexto)];
 
-        if (matches.length < 3) {
-            const fuzzy = bancoGeral
-                .map(p => ({ p, d: getDistancia(ultima, p) }))
-                .filter(i => i.d <= 2)
-                .sort((a, b) => a.d - b.d)
-                .map(i => i.p);
-            matches = [...new Set([...matches, ...fuzzy])].slice(0, 3);
+        const escolhasFinaisDoUsuario = new Map();
+
+        for (const palavra of palavrasUnicas) {
+            const limpa = palavra.toLowerCase().replace(/[^a-zA-Záéíóúâêîôûãõç]/g, '');
+            if (!limpa || ia.existePalavra(limpa)) continue;
+
+          // Limpa rejeitados para esta palavra no início
+            ia.limparRejeitados(limpa);
+
+            let palavrasIgnoradas = new Set();
+            let aceitou = false;
+            let tentativas = 0;
+
+            while (!aceitou && tentativas < 50) {
+                tentativas++;
+                const sugestoes = ia.obterSugestoes(palavra, palavrasIgnoradas);
+                const sugestaoAtual = sugestoes[0];
+
+                if (!sugestaoAtual || sugestaoAtual === palavra) {
+                    console.log(`\n Nenhuma sugestão restante para: "${palavra}". Mantendo original.`);
+                    escolhasFinaisDoUsuario.set(palavra, palavra);
+                    break;
+                }
+
+                const fonte = ia.usandoBanco ? ' Banco' : ' Fonética';
+                const rejeitados = ia.getRejeitados(limpa);
+
+                console.log(`\n-----------------------------------------------`);
+                console.log(`Palavra suspeita: "${palavra}"`);
+                console.log(` Sugestão (${fonte}): "${sugestaoAtual}"`);
+
+                if (rejeitados.size > 0) {
+                    console.log(`    ${rejeitados.size} opções já rejeitadas foram removidas da lista`);
+                }
+
+                
+                if (sugestoes.length > 1) {
+                    console.log(`\n Outras opções (${sugestoes.length} disponíveis):`);
+                    const maxMostrar = Math.min(10, sugestoes.length);
+                    for (let i = 1; i < maxMostrar; i++) {
+                        console.log(`   ${i}. ${sugestoes[i]}`);
+                    }
+                    if (sugestoes.length > maxMostrar) {
+                        console.log(`   ... e mais ${sugestoes.length - maxMostrar} opções (use números para navegar)`);
+                    }
+                }
+
+                let resposta;
+                try {
+                    resposta = await perguntarNoTerminal(`\nOpções: [y = sim] [n = próxima] [x = ignorar] [número para outra opção]: `);
+                } catch (e) {
+                    console.log(`\n Tempo limite excedido. Mantendo original.`);
+                    escolhasFinaisDoUsuario.set(palavra, palavra);
+                    break;
+                }
+
+                if (resposta === 'y') {
+                    escolhasFinaisDoUsuario.set(palavra, sugestaoAtual);
+                    ia.salvarHistorico(sugestaoAtual);
+                    aceitou = true;
+                    console.log(`Proxima...`);
+                } else if (resposta === 'n') {
+
+                    ia.registrarRejeicao(limpa, sugestaoAtual);
+                    palavrasIgnoradas.add(sugestaoAtual.toLowerCase());
+                    console.log(`Opção"${sugestaoAtual}" rejeitada `);
+                } else if (resposta === 'x') {
+                    escolhasFinaisDoUsuario.set(palavra, palavra);
+                    aceitou = true;
+                    console.log(`Ignorada.`);
+                } else if (!isNaN(resposta) && parseInt(resposta) > 0 && parseInt(resposta) < sugestoes.length) {
+                    const indice = parseInt(resposta);
+                    const opcaoEscolhida = sugestoes[indice];
+                    if (opcaoEscolhida) {
+                        escolhasFinaisDoUsuario.set(palavra, opcaoEscolhida);
+                        ia.salvarHistorico(opcaoEscolhida);
+                        aceitou = true;
+                        console.log(`Opção ${indice} selecionada e salva no histórico!`);
+                    }
+                } else {
+                    console.log(`Opção inválida.`);
+                }
+            }
+
+
+            ia.limparRejeitados(limpa);
         }
 
-        botoes.forEach((btn, i) => {
-            if (matches[i]) {
-                btn.innerText = matches[i];
-                btn.style.visibility = 'visible';
-            } else {
-                btn.style.visibility = 'hidden';
-            }
-        });
-    });
+        const textoFinalCorrigido = ia.processarTexto(textoOriginal, escolhasFinaisDoUsuario);
 
-    function completar(btn) {
-        const partes = input.value.trim().split(/\s+/);
-        partes[partes.length - 1] = btn.innerText;
-        input.value = partes.join(' ') + ' ';
-        input.focus();
-        botoes.forEach(b => b.style.visibility = 'hidden');
+        console.log(`\n===============================================`);
+        if (escolhasFinaisDoUsuario.size > 0) {
+            fs.writeFileSync(caminhoDoArquivoAlvo, textoFinalCorrigido, 'utf-8');
+            console.log(`Sucesso! Arquivo '${path.basename(caminhoDoArquivoAlvo)}' atualizado.`);
+        } else {
+            console.log(`Nenhuma alteração pendente.`);
+        }
+
+        ia.limparCache();
+
+    } catch (erro) {
+        console.error(`Erro:`, erro.message);
     }
+}
 
-    // Boot inicial (Português)
-    boot(CONFIG_PT);
-</script>
-
-</body>
-</html>
+const meuArquivoAlvo = path.join(__dirname, 'meu_texto.txt');
+rodarCorretorDeArquivo(meuArquivoAlvo);
